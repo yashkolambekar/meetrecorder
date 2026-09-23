@@ -13,9 +13,9 @@ services:
       - SKIP_RECORDING
       - MAX_DURATION
       - DEBUG
-      - DASHBOARD_PORT=3000
+      - DASHBOARD_PORT=3333
     ports:
-      - "3000:3000"  # dashboard: http://localhost:3000
+      - "3333:3333"  # dashboard: http://localhost:3333
     volumes:
       - ./recordings:/recordings
       - ./cookies.json:/app/cookies.json

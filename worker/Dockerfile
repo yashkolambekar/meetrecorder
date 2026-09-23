@@ -2,10 +2,12 @@ FROM node:20-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps: Chrome, Xvfb, PulseAudio, ffmpeg, headless-Chrome runtime libs
+# System deps: Chrome, Xvfb, WM (fluxbox), cursor hider (unclutter), PulseAudio, ffmpeg,
+# headless-Chrome runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget gnupg ca-certificates \
     xvfb pulseaudio ffmpeg \
+    fluxbox unclutter \
     fonts-liberation libnss3 libgbm1 libasound2 libatk1.0-0 \
     libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
     libxdamage1 libxrandr2 libgtk-3-0 libpango-1.0-0 libcairo2 \

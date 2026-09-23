@@ -136,9 +136,8 @@ export async function joinAndRecord(opts: JoinOpts): Promise<void> {
       // No --use-fake-device-for-media-stream: Meet accepts participants
       // without camera/mic and we save the CPU of running synthetic streams.
       '--auto-select-desktop-capture-source=Entire screen',
+      '--kiosk',
       '--start-fullscreen',
-      '--window-size=1280,720',
-      '--window-position=0,0',
     ],
   });
 
