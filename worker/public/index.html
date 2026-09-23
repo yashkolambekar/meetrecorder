@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Meet Recorder — Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f0f12;
+      --panel: #1a1a20;
+      --panel-2: #20202a;
+      --border: #2a2a32;
+      --text: #e6e6ea;
+      --muted: #8a8a93;
+      --accent: #4ade80;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --info: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+    }
+    header {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 16px;
+      position: sticky; top: 0; background: var(--bg); z-index: 5;
+    }
+    header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    header .clock { margin-left: auto; color: var(--muted); font-size: 12px; }
+    main {
+      padding: 20px;
+      max-width: 1920px; margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 380px;
+      gap: 20px;
+    }
+    @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    section h2 {
+      margin: 0 0 12px;
+      font-size: 13px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row + .row { margin-top: 8px; }
+    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      min-height: 100px;
+      resize: vertical;
+    }
+    button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover:not(:disabled) { background: #2a2a36; border-color: #3a3a44; }
+    button.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+    button.primary:hover:not(:disabled) { background: #2563eb; }
+    button.danger { background: #7f1d1d; border-color: #991b1b; color: #fff; }
+    button.danger:hover:not(:disabled) { background: #991b1b; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 12px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .badge.idle      { background: #2a2a32; color: var(--muted); }
+    .badge.joining   { background: #1e3a8a; color: #93c5fd; }
+    .badge.admitted  { background: #155e75; color: #67e8f9; }
+    .badge.recording { background: #14532d; color: var(--accent); }
+    .badge.ending    { background: #78350f; color: var(--warn); }
+    .badge.done      { background: #166534; color: var(--accent); }
+    .badge.failed    { background: #7f1d1d; color: var(--err); }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+    }
+    .meta .cell { display: flex; flex-direction: column; gap: 2px; }
+    .meta .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .meta .value { font-size: 13px; font-weight: 500; word-break: break-all; }
+    .screen {
+      background: #000;
+      border-radius: 6px;
+      aspect-ratio: 16 / 9;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    .screen img { width: 100%; height: 100%; object-fit: contain; }
+    .placeholder { color: var(--muted); font-size: 13px; text-align: center; padding: 40px; }
+    .rec-list { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+    .rec-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px; background: var(--panel-2);
+      border-radius: 6px; border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .rec-item .name { flex: 1; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .rec-item .size { color: var(--muted); font-size: 11px; }
+    .rec-item a {
+      color: var(--info); text-decoration: none;
+      padding: 4px 10px; border: 1px solid var(--border);
+      border-radius: 4px; font-size: 11px;
+    }
+    .rec-item a:hover { background: #1e293b; }
+    .toast {
+      position: fixed; right: 20px; bottom: 20px;
+      padding: 10px 16px;
+      border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 13px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      max-width: 360px;
+      opacity: 0; transform: translateY(8px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.err { border-color: var(--err); color: var(--err); }
+    .toast.ok  { border-color: var(--accent); color: var(--accent); }
+    footer {
+      padding: 12px 20px;
+      color: var(--muted); font-size: 12px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+    .checkbox { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+    .checkbox input { margin: 0; }
+    .help { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Meet Recorder</h1>
+    <span id="state-badge" class="badge idle">idle</span>
+    <span class="clock">refresh: <span id="tick">—</span></span>
+  </header>
+
+  <main>
+    <div class="left">
+      <section>
+        <div class="meta">
+          <div class="cell"><span class="label">Meet URL</span><span class="value" id="meet-url">—</span></div>
+          <div class="cell"><span class="label">Job ID</span><span class="value" id="job-id">—</span></div>
+          <div class="cell"><span class="label">Bot name</span><span class="value" id="bot-name">—</span></div>
+          <div class="cell"><span class="label">Elapsed</span><span class="value" id="elapsed">—</span></div>
+          <div class="cell"><span class="label">Output</span><span class="value" id="out-file">—</span></div>
+          <div class="cell"><span class="label">Error</span><span class="value" id="error" style="color: var(--err);">—</span></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="row" style="margin-bottom: 10px; align-items: center;">
+          <strong style="font-size: 13px;">Live view</strong>
+          <span class="help">Screenshots are captured on demand (no continuous polling).</span>
+          <button id="capture-btn" class="primary" style="margin-left: auto;">Capture screenshot</button>
+        </div>
+        <div class="screen">
+          <img id="shot" alt="live meeting screenshot" />
+          <div class="placeholder" id="placeholder">
+            Click <b>Capture screenshot</b> to grab the current view.<br/>
+            Start a recording from the right panel first.
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Recordings</h2>
+        <div class="row">
+          <button id="refresh-recs">Refresh list</button>
+          <span class="help">Files in <code id="rec-dir">/recordings</code></span>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <div class="rec-list" id="rec-list" style="width:100%;">
+            <div class="placeholder" style="padding: 16px;">No recordings yet.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="right">
+      <section>
+        <h2>Start recording</h2>
+        <div class="row">
+          <div style="flex: 1; min-width: 240px;">
+            <label>Meet URL</label>
+            <input type="text" id="form-url" placeholder="https://meet.google.com/abc-defg-hij" />
+          </div>
+        </div>
+        <div class="row">
+          <div style="flex: 1;">
+            <label>Bot name</label>
+            <input type="text" id="form-bot" placeholder="Recording Bot" />
+          </div>
+          <div style="width: 110px;">
+            <label>Max (sec, 0=∞)</label>
+            <input type="number" id="form-max" min="0" value="0" />
+          </div>
+        </div>
+        <div class="row">
+          <label class="checkbox">
+            <input type="checkbox" id="form-skip" /> Skip recording (just join, no ffmpeg)
+          </label>
+        </div>
+        <div class="row" style="margin-top: 12px; gap: 8px;">
+          <button class="primary" id="start-btn">Start recording</button>
+          <button class="danger" id="abort-btn" disabled>Abort</button>
+        </div>
+        <div class="row">
+          <div class="help">One recording at a time. New requests while busy get rejected.</div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Cookies</h2>
+        <div class="row">
+          <div style="flex: 1;">
+            <label>Paste cookies.json (JSON array) or Netscape cookie file</label>
+            <textarea id="cookies-text" placeholder='[{"name":"SID","value":"...","domain":".google.com",...}]'></textarea>
+          </div>
+        </div>
+        <div class="row">
+          <button class="primary" id="upload-cookies">Save cookies</button>
+          <button id="load-current">Show current</button>
+          <span class="help" id="cookies-status">—</span>
+        </div>
+        <div class="row">
+          <div class="help">Next job will use these cookies. Current running job is unaffected.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>Screenshots are captured on demand — click <b>Capture screenshot</b> above. Keep this tab open.</footer>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const shot = $('shot'), placeholder = $('placeholder');
+    const badge = $('state-badge');
+    const meetUrlEl = $('meet-url'), jobIdEl = $('job-id'), botNameEl = $('bot-name');
+    const elapsedEl = $('elapsed'), outFileEl = $('out-file'), errorEl = $('error');
+    const tickEl = $('tick'), recListEl = $('rec-list'), recDirEl = $('rec-dir');
+    const startBtn = $('start-btn'), abortBtn = $('abort-btn');
+    const refreshBtn = $('refresh-recs'), uploadBtn = $('upload-cookies'), loadCurBtn = $('load-current');
+    const captureBtn = $('capture-btn');
+    const cookiesText = $('cookies-text'), cookiesStatus = $('cookies-status');
+    const toastEl = $('toast');
+
+    let lastShotUrl = null;
+    let busy = false;
+
+    function toast(msg, kind = '') {
+      toastEl.textContent = msg;
+      toastEl.className = 'toast show ' + kind;
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => { toastEl.className = 'toast'; }, 3500);
+    }
+
+    function formatElapsed(sec) {
+      if (sec == null || isNaN(sec)) return '—';
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = Math.floor(sec % 60);
+      const pad = (n) => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+    }
+
+    function formatBytes(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+      return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+
+    async function refreshStatus() {
+      try {
+        const r = await fetch('/status', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        const state = j.state || 'idle';
+        badge.textContent = state + (j.busy ? ' (busy)' : '');
+        badge.className = 'badge ' + state;
+        meetUrlEl.textContent = j.meetUrl || '—';
+        jobIdEl.textContent = j.jobId || '—';
+        botNameEl.textContent = j.botName || '—';
+        elapsedEl.textContent = formatElapsed(j.elapsedSec);
+        outFileEl.textContent = j.outFile || '—';
+        errorEl.textContent = j.error || '—';
+        busy = !!j.busy;
+        startBtn.disabled = busy;
+        abortBtn.disabled = !busy && !['joining', 'admitted', 'recording', 'ending'].includes(state);
+      } catch (e) {
+        console.warn('status fetch failed', e);
+      }
+    }
+
+    async function captureOnce() {
+      if (captureBtn.disabled) return;
+      captureBtn.disabled = true;
+      const oldText = captureBtn.textContent;
+      captureBtn.textContent = 'Capturing…';
+      try {
+        const t = Date.now();
+        const r = await fetch(`/screenshot?t=${t}`, { cache: 'no-store' });
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          throw new Error(txt || `HTTP ${r.status}`);
+        }
+        const blob = await r.blob();
+        if (blob.size === 0) throw new Error('empty response');
+        const url = URL.createObjectURL(blob);
+        shot.onload = () => { if (lastShotUrl) URL.revokeObjectURL(lastShotUrl); lastShotUrl = url; };
+        shot.src = url;
+        placeholder.style.display = 'none';
+        shot.style.display = 'block';
+        captureBtn.textContent = `Captured ${new Date().toLocaleTimeString()} — recapture`;
+      } catch (e) {
+        placeholder.textContent = `Capture failed: ${e.message || e}. ${busy ? 'Bot may be transitioning.' : 'No job running.'}`;
+        placeholder.style.display = 'block';
+        shot.style.display = 'none';
+        captureBtn.textContent = oldText;
+      } finally {
+        captureBtn.disabled = false;
+      }
+    }
+
+    async function refreshRecordings() {
+      try {
+        const r = await fetch('/api/recordings', { cache: 'no-store' });
+        if (!r.ok) throw new Error('list failed');
+        const j = await r.json();
+        recDirEl.textContent = j.dir || '';
+        const list = j.recordings || [];
+        if (list.length === 0) {
+          recListEl.innerHTML = '<div class="placeholder" style="padding: 16px;">No recordings yet.</div>';
+          return;
+        }
+        recListEl.innerHTML = '';
+        for (const rec of list) {
+          const item = document.createElement('div');
+          item.className = 'rec-item';
+          item.innerHTML = `
+            <span class="name">${rec.name}</span>
+            <span class="size">${formatBytes(rec.sizeBytes)}</span>
+            <a href="/api/recordings/${encodeURIComponent(rec.name)}" download="${rec.name}">Download</a>
+          `;
+          recListEl.appendChild(item);
+        }
+      } catch (e) {
+        recListEl.innerHTML = '<div class="placeholder" style="padding: 16px;">Failed to list recordings.</div>';
+      }
+    }
+
+    async function startJob() {
+      const meetUrl = $('form-url').value.trim();
+      const botName = $('form-bot').value.trim() || 'Recording Bot';
+      const maxDurationSec = Math.max(0, Math.floor(Number($('form-max').value) || 0));
+      const skipRecording = $('form-skip').checked;
+
+      if (!meetUrl) { toast('Meet URL required', 'err'); return; }
+      startBtn.disabled = true;
+      try {
+        const r = await fetch('/api/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ meetUrl, botName, maxDurationSec, skipRecording }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'start failed');
+        toast(`Started job ${j.jobId}`, 'ok');
+        refreshRecordings();
+      } catch (e) {
+        toast(String(e.message || e), 'err');
+        startBtn.disabled = false;
+      }
+    }
+
+    async function abortJob() {
+      abortBtn.disabled = true;
+      try {
+        const r = await fetch('/api/jobs/abort', { method: 'POST' });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'abort failed');
+        toast('Abort sent', 'ok');
+      } catch (e) {
+        toast(String(e.message || e), 'err');
+        abortBtn.disabled = false;
+      }
+    }
+
+    async function uploadCookies() {
+      const content = cookiesText.value;
+      if (!content.trim()) { toast('Paste cookies first', 'err'); return; }
+      uploadBtn.disabled = true;
+      cookiesStatus.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/cookies', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'upload failed');
+        cookiesStatus.textContent = `Saved (${formatBytes(j.bytes)})`;
+        toast('Cookies saved', 'ok');
+      } catch (e) {
+        cookiesStatus.textContent = 'Failed';
+        toast(String(e.message || e), 'err');
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    }
+
+    async function loadCurrentCookies() {
+      // There's no GET endpoint — fetch the list view to confirm path, then
+      // show the user the textarea is already populated (or empty).
+      cookiesStatus.textContent = 'Paste your cookies file above and click Save.';
+    }
+
+    startBtn.addEventListener('click', startJob);
+    abortBtn.addEventListener('click', abortJob);
+    refreshBtn.addEventListener('click', refreshRecordings);
+    uploadBtn.addEventListener('click', uploadCookies);
+    loadCurBtn.addEventListener('click', loadCurrentCookies);
+    captureBtn.addEventListener('click', captureOnce);
+
+    // Initial paint
+    refreshStatus();
+    refreshRecordings();
+
+    // Status: every 1s. Recordings: every 5s. No screenshot polling.
+    setInterval(() => {
+      tickEl.textContent = new Date().toLocaleTimeString();
+      refreshStatus();
+    }, 1000);
+    setInterval(refreshRecordings, 5000);
+  </script>
+</body>
+</html>

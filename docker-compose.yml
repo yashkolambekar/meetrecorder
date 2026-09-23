@@ -1,0 +1,24 @@
+version: "3.9"
+
+# Minimal compose: only the worker + shared recordings volume.
+# Redis / Postgres / API / dashboard come after the worker is validated.
+
+services:
+  worker:
+    build: ./worker
+    environment:
+      - MEET_URL
+      - BOT_NAME
+      - OUTPUT_DIR=/recordings
+      - SKIP_RECORDING
+      - MAX_DURATION
+      - DEBUG
+      - DASHBOARD_PORT=3000
+    ports:
+      - "3000:3000"  # dashboard: http://localhost:3000
+    volumes:
+      - ./recordings:/recordings
+      - ./cookies.json:/app/cookies.json
+    shm_size: "2gb"
+    cap_add:
+      - SYS_ADMIN
