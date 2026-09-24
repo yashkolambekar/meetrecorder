@@ -135,9 +135,9 @@ export async function joinAndRecord(opts: JoinOpts): Promise<void> {
       '--use-fake-ui-for-media-stream',
       // No --use-fake-device-for-media-stream: Meet accepts participants
       // without camera/mic and we save the CPU of running synthetic streams.
-      '--auto-select-desktop-capture-source=Entire screen',
-      '--kiosk',
-      '--start-fullscreen',
+      // No --kiosk / --start-fullscreen: those need a window manager, which
+      // our display-less host doesn't have. ffmpeg's x11grab captures the
+      // whole X display regardless of window state.
     ],
   });
 
