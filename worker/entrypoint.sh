@@ -1,24 +1,33 @@
 #!/bin/bash
 set -e
 
-# Start Xvfb on :99 — our virtual display. Chrome runs "headed" against this
-# so Meet's bot-checks can't tell it's headless. ffmpeg's x11grab captures
-# from this same display.
+# Virtual X display at 1280x720x24. Chrome runs "headed" against this so Meet
+# can't tell it's headless. ffmpeg's x11grab captures from this same display.
 Xvfb :99 -screen 0 1280x720x24 -ac &
 XVFB_PID=$!
 export DISPLAY=:99
-
-# Give X a moment to come up before clients connect.
 sleep 1
 
-# Start PulseAudio and create a virtual null sink we can capture from.
+# PulseAudio: null sink that Chrome's audio output is routed to. ffmpeg
+# monitors it for the recording's audio track.
 pulseaudio -D --exit-idle-time=-1 --verbose=0
 sleep 0.5
 pactl load-module module-null-sink sink_name=MeetSink >/dev/null
 pactl set-default-sink MeetSink
 
-# Forward SIGTERM/SIGINT to the node process, then kill the helpers.
-trap 'kill -TERM "$NODE_PID" 2>/dev/null; kill $XVFB_PID 2>/dev/null; exit 0' TERM INT
+# VNC stack. Loopback only — SSH tunnel from your laptop brings it to you.
+# x11vnc -localhost: refuses non-loopback TCP clients.
+# websockify: bridges HTTP/WS clients on :6080 to the VNC port :5900.
+x11vnc -display :99 -rfbport 5900 -localhost -nopw -forever -quiet -bg
+websockify --web=/usr/share/novnc 6080 localhost:5900 >/var/log/websockify.log 2>&1 &
+WEBSOCKIFY_PID=$!
+
+# Make sure the persistent profile and jobs directory exist, owned by root
+# (the worker process also runs as root in this image).
+mkdir -p /var/lib/meet-profile /var/lib/meet-recorder /var/log/meet-recorder
+
+# Run the controller. SIGTERM → graceful (5s grace for browser/ffmpeg to die).
+trap 'kill -TERM "$NODE_PID" 2>/dev/null || true; kill "$WEBSOCKIFY_PID" 2>/dev/null || true; kill "$XVFB_PID" 2>/dev/null || true; sleep 0.5; exit 0' TERM INT
 
 node dist/worker.js "$@" &
 NODE_PID=$!

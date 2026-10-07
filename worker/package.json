@@ -1,15 +1,13 @@
 {
   "name": "meet-recorder-worker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "build": "tsc",
     "start": "node dist/worker.js"
   },
   "dependencies": {
-    "playwright": "^1.40.0",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "playwright": "^1.40.0"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

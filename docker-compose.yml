@@ -1,24 +1,47 @@
 version: "3.9"
 
-# Minimal compose: only the worker + shared recordings volume.
-# Redis / Postgres / API / dashboard come after the worker is validated.
-
 services:
   worker:
     build: ./worker
     environment:
-      - MEET_URL
-      - BOT_NAME
-      - OUTPUT_DIR=/recordings
-      - SKIP_RECORDING
-      - MAX_DURATION
-      - DEBUG
       - DASHBOARD_PORT=3333
+      - OUTPUT_DIR=/recordings
+      - PROFILE_DIR=/var/lib/meet-profile
+      - JOBS_DIR=/var/lib/meet-recorder
+      - LOGS_DIR=/var/log/meet-recorder
+      - SEGMENT_SECONDS=600
+      - CHROME_PATH=/usr/bin/google-chrome-stable
+      - DISPLAY=:99
+      # Optional: HTTP Basic auth for the dashboard. Format: "user:password".
+      # Leave empty to disable auth (recommended only behind SSH tunnel / localhost).
+      - DASHBOARD_AUTH=
+      # Cookie injection is OFF by default. Set to 1 to re-enable the legacy
+      # POST /api/cookies flow against a cookies.json file.
+      - ALLOW_COOKIE_INJECTION=0
+      # Optional: comma-separated list of clients/paths exempt from auth
+      # (left empty here).
     ports:
-      - "3333:3333"  # dashboard: http://localhost:3333
+      # Bind to loopback. SSH tunnel from your laptop.
+      - "127.0.0.1:3333:3333"   # dashboard + REST
+      - "127.0.0.1:6080:6080"   # noVNC
     volumes:
       - ./recordings:/recordings
-      - ./cookies.json:/app/cookies.json
+      - meet-profile:/var/lib/meet-profile
+      - meet-jobs:/var/lib/meet-recorder
+      - ./logs:/var/log/meet-recorder
     shm_size: "2gb"
     cap_add:
       - SYS_ADMIN
+    restart: on-failure
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3333/api/profile/status', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))\""
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  meet-profile:
+  meet-jobs:

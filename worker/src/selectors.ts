@@ -1,6 +1,9 @@
 // Meet UI selectors. Google ships UI changes that break these — fix in this one file.
-// Where the UI has multiple variants (e.g. different button labels), we expose
+// Where the UI has multiple variants (e.g., different button labels), we expose
 // candidate lists so the worker tries each in order.
+//
+// Grouped into lifecycle phases. New selectors added during the persistent-profile
+// refactor are tagged `/* new */` so we can audit what changed.
 
 export const acceptCookiesCandidates = [
   'button:has-text("Accept all")',
@@ -43,6 +46,34 @@ export const meetingEndedCandidates = [
   ':text("You left the meeting")',
   ':text("Meeting ended")',
   ':text("Return to home screen")',
+  ':text("You\'re the only one here")',         /* new */
+  ':text("The meeting has ended")',             /* new */
+  ':text("The call has ended")',                /* new */
+];
+
+export const googleAuthRequiredCandidates = [                       /* new */
+  'input[type="email"]',
+  '[data-identifier="identifierId"]',
+  ':text("Sign in to continue to Meet")',
+  ':text("Sign in to continue")',
+  ':text("Sign in")',
+];
+
+export const reconnectingCandidates = [                             /* new */
+  ':text("Reconnecting")',
+  ':text("Trying to reconnect")',
+];
+
+export const removedFromMeetingCandidates = [                       /* new */
+  ':text("You were removed")',
+  ':text("You have been removed")',
+  ':text("Someone removed you from the call")',
+];
+
+export const cantJoinCandidates = [                                 /* new */
+  ':text("You can\'t join this meeting")',
+  ':text("You need a Google Account")',
+  ':text("This meeting is not available")',
 ];
 
 // Layout menu (post-join) — current Meet UI puts it under
@@ -59,8 +90,6 @@ export const adjustViewMenuItemCandidates = [
 ];
 
 export const spotlightOptionCandidates = [
-  // The current "Adjust view" panel uses real <input type="radio"> inside
-  // <label class="DxvcU"> wrappers — not menuitemradio.
   'label:has-text("Spotlight")',
   'input[type="radio"][name="preferences"][value="mvZqyf"]',
   '[role="radio"]:has-text("Spotlight")',
@@ -68,11 +97,34 @@ export const spotlightOptionCandidates = [
   '[role="menuitem"]:has-text("Spotlight")',
 ];
 
-// The "Adjust view" dialog has an X button at the top-right. Close it after
-// picking a layout so it doesn't sit on top of the screen-share for the
-// rest of the recording.
 export const dialogCloseButtonCandidates = [
   'button[aria-label="Close"]',
   '[role="dialog"] button[aria-label="Close"]',
   'button:has(i.google-symbols:text("close"))',
+];
+
+// Profile readiness indicators on myaccount.google.com / accounts.google.com.
+export const profileReadyCandidates = [                             /* new */
+  'img[alt*="Profile" i]',
+  'a[aria-label*="Google Account" i]',
+  '[data-profile-photo]',
+  '[aria-label*="Account" i][role="button"]',
+  'button[aria-label*="Google Account" i]',
+];
+
+export const profileSignedInIndicators = [                          /* new */
+  ':text("Welcome")',
+  ':text("Your account")',
+];
+
+// Selector groups, in priority order, used by the poll loop.
+export const failureSelectorGroups: Array<{
+  group: 'auth' | 'removed' | 'reconnecting' | 'cannotJoin' | 'ended';
+  candidates: string[];
+}> = [
+  { group: 'auth',         candidates: googleAuthRequiredCandidates },
+  { group: 'removed',      candidates: removedFromMeetingCandidates },
+  { group: 'cannotJoin',   candidates: cantJoinCandidates },
+  { group: 'reconnecting', candidates: reconnectingCandidates },
+  { group: 'ended',        candidates: meetingEndedCandidates },
 ];

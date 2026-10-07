@@ -1,3 +1,8 @@
 cookies.json
 recordings/
 debug/
+logs/
+node_modules/
+worker/dist/
+worker/node_modules/
+.DS_Store

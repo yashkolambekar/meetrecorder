@@ -1,13 +1,32 @@
-import { chromium } from 'playwright-extra';
-import stealth from 'puppeteer-extra-plugin-stealth';
-import type { Page } from 'playwright';
-import { spawn } from 'node:child_process';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as selectors from './selectors';
-import { setLatestScreenshot, setStatus } from './server';
+// Pipeline for one recording job. Consumes:
+//   - BrowserManager (persistent Chrome profile)
+//   - Recorder     (ffmpeg child + segmentation)
+//   - JobStore     (per-job metadata)
+//   - diagnostics  (failure classification)
+//
+// Replaces the old cookie-injection flow. Cookies are NOT loaded unless
+// ALLOW_COOKIE_INJECTION=1 is set (back-compat escape hatch).
 
-chromium.use(stealth());
+import { BrowserContext, Page, Response } from 'playwright';
+import * as fs from 'node:fs';
+import { BrowserManager } from './browserManager';
+import { Recorder } from './recorder';
+import { JobStore, JobRecord, JobState, extractMeetCode, deriveJobOutDir } from './jobStore';
+import { classifyEndSignal, groupForSelector, FailureReason, ClassifyOutput } from './diagnostics';
+import {
+  acceptCookiesCandidates,
+  askToJoinCandidates,
+  cameraToggleCandidates,
+  micToggleCandidates,
+  nameInputCandidates,
+  inCallCandidates,
+  moreOptionsButtonCandidates,
+  adjustViewMenuItemCandidates,
+  spotlightOptionCandidates,
+  dialogCloseButtonCandidates,
+  failureSelectorGroups,
+} from './selectors';
+import { info, warn, error, debug } from './log';
 
 export interface JoinOpts {
   meetUrl: string;
@@ -16,352 +35,489 @@ export interface JoinOpts {
   outputDir: string;
   skipRecording?: boolean;
   maxDurationSec?: number;
-  onBrowser?: (browser: import('playwright').Browser) => void;
-  onPage?: (page: import('playwright').Page) => void;
+  jobStore: JobStore;
+  onState?: (state: JobState, extra?: Record<string, unknown>) => void;
+  onAbortRequest?: () => boolean;
 }
 
-const DEBUG = process.env.DEBUG !== '0'; // default on while we develop; set DEBUG=0 to silence
-
-function loadGoogleCookies(): any[] {
-  const cookiesPath = process.env.COOKIES_PATH || '/app/cookies.json';
-  if (!fs.existsSync(cookiesPath)) return [];
-  const raw = fs.readFileSync(cookiesPath, 'utf-8').trim();
-  if (!raw) return [];
-
-  let parsed: any[] = [];
-  try {
-    if (raw.startsWith('[')) {
-      const j = JSON.parse(raw);
-      if (Array.isArray(j)) parsed = j;
-    } else if (raw.startsWith('#') && raw.includes('\t')) {
-      parsed = parseNetscapeCookies(raw);
-    } else {
-      const j = JSON.parse(raw);
-      if (Array.isArray(j)) parsed = j;
-    }
-  } catch (e) {
-    console.warn('failed to parse cookies:', (e as Error).message);
-    return [];
-  }
-
-  const out: any[] = [];
-  for (const c of parsed) {
-    let domain = c.domain || c.host || '';
-    if (!domain.includes('google.com')) continue;
-    if (!domain.startsWith('.')) domain = '.' + domain;
-    const sameSiteRaw = String(c.sameSite || 'Lax').toLowerCase();
-    const sameSite = sameSiteRaw.charAt(0).toUpperCase() + sameSiteRaw.slice(1);
-    out.push({
-      name: String(c.name),
-      value: String(c.value),
-      domain,
-      path: c.path || '/',
-      expires:
-        typeof c.expirationDate === 'number' ? c.expirationDate :
-        typeof c.expires === 'number' ? c.expires : -1,
-      httpOnly: !!c.httpOnly,
-      secure: !!c.secure,
-      sameSite,
-    });
-  }
-  return out;
+export interface JoinResult {
+  state: JobState;
+  failureReason?: FailureReason;
+  failureDetail?: string;
+  bytes: number;
+  durationSec: number;
 }
 
-function parseNetscapeCookies(content: string): any[] {
-  // Netscape cookie file: tab-separated fields per line.
-  // Format: domain \t flag \t path \t secure \t expiration \t name \t value
-  // Lines starting with # are comments; blank lines are ignored.
-  const cookies: any[] = [];
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const parts = line.split('\t');
-    if (parts.length < 7) continue;
-    const [domain, , path, secureStr, expirationStr, name, ...valueParts] = parts;
-    const value = valueParts.join('\t');
-    cookies.push({
-      name,
-      value,
-      domain,
-      path,
-      expires: parseInt(expirationStr, 10) || -1,
-      secure: secureStr === 'TRUE',
-    });
-  }
-  return cookies;
+interface PollState {
+  aborted: boolean;
+  browserDisconnected: boolean;
+  pageError: { message: string } | null;
+  matchedGroup?: 'auth' | 'removed' | 'reconnecting' | 'cannotJoin' | 'ended';
+  matchedSelector?: string;
+  lastUrl: string;
+  lastTitle: string;
+  startedAtMs: number;
+  reason: FailureReason | null;
+  reasonDetail: string | null;
+  maxDurationTimer?: NodeJS.Timeout;
 }
 
-async function debugDump(page: Page, label: string, jobId: string, outputDir: string) {
-  if (!DEBUG) return;
-  const dir = path.join(outputDir, `debug-${jobId}`);
-  fs.mkdirSync(dir, { recursive: true });
-  try {
-    const url = page.url();
-    const title = await page.title();
-    console.log(`[${jobId}] debug[${label}] url=${url} title="${title}"`);
-    fs.writeFileSync(path.join(dir, `${label}.html`), await page.content());
-    await page.screenshot({ path: path.join(dir, `${label}.png`), fullPage: true });
-  } catch (e) {
-    console.warn(`[${jobId}] debug dump failed:`, (e as Error).message);
-  }
-}
-
-async function tryClickAny(page: Page, candidates: string[], label: string): Promise<boolean> {
+async function tryClickAny(page: Page, candidates: string[], label: string, jobId: string): Promise<boolean> {
   for (const sel of candidates) {
     try {
       await page.click(sel, { timeout: 4000 });
-      console.log(`[${label}] clicked: ${sel}`);
+      info('clicked', { jobId, label, sel });
       return true;
     } catch {}
   }
   return false;
 }
 
-export async function joinAndRecord(opts: JoinOpts): Promise<void> {
-  const { meetUrl, jobId, botName, outputDir, skipRecording } = opts;
+export async function joinAndRecord(opts: JoinOpts): Promise<JoinResult> {
+  const { meetUrl, jobId, botName, outputDir, skipRecording, maxDurationSec, jobStore } = opts;
+  const startedAtMs = Date.now();
+  const meetCode = extractMeetCode(meetUrl);
+  const outDir = deriveJobOutDir(outputDir, jobId, startedAtMs);
 
-  fs.mkdirSync(outputDir, { recursive: true });
-  const outFile = path.join(outputDir, `${jobId}.mp4`);
+  const baseRec: JobRecord = {
+    jobId,
+    meetUrl,
+    meetCode,
+    botName,
+    maxDurationSec,
+    startedAt: startedAtMs,
+    state: 'STARTING',
+    outDir,
+    segments: [],
+    totalBytes: 0,
+    skipRecording: !!skipRecording,
+  };
+  await jobStore.create(baseRec);
+  setState(opts, 'STARTING', { jobId, meetUrl, meetCode, outDir });
 
-  console.log(`[${jobId}] launching browser`);
-  setStatus({ state: 'joining', outFile, startedAt: Date.now(), elapsedSec: 0 });
-  const browser = await chromium.launch({
-    headless: false,
-    executablePath: '/usr/bin/google-chrome-stable',
-    args: [
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--use-fake-ui-for-media-stream',
-      // No --use-fake-device-for-media-stream: Meet accepts participants
-      // without camera/mic and we save the CPU of running synthetic streams.
-      // No --kiosk / --start-fullscreen: those need a window manager, which
-      // our display-less host doesn't have. ffmpeg's x11grab captures the
-      // whole X display regardless of window state.
-    ],
-  });
+  let page: Page | null = null;
+  let recorder: Recorder | null = null;
+  let result: JoinResult | null = null;
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-    userAgent:
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'en-US',
-  });
-  const page = await context.newPage();
-
-  const cookies = loadGoogleCookies();
-  if (cookies.length > 0) {
-    await context.addCookies(cookies);
-    console.log(`[${jobId}] applied ${cookies.length} Google cookies`);
-  }
-
-  console.log(`[${jobId}] navigating to ${meetUrl}`);
-  await page.goto(meetUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.waitForTimeout(3000); // let Meet's JS settle
-  await debugDump(page, '01-loaded', jobId, outputDir);
-
-  // Expose browser + page to the controller so it can abort and capture on demand.
-  if (opts.onBrowser) opts.onBrowser(browser);
-  if (opts.onPage) opts.onPage(page);
-
-  // Lightweight elapsed timer — no screenshot work. The dashboard polls /status
-  // every 1s and we just keep elapsedSec fresh.
-  const startedAt = Date.now();
-  const elapsedTimer = setInterval(() => {
-    setStatus({ elapsedSec: Math.floor((Date.now() - startedAt) / 1000) });
-  }, 1000);
-
-  // Cookie banner (best effort)
-  await tryClickAny(page, selectors.acceptCookiesCandidates, `[${jobId}] cookies`);
-
-  // Fill name (best effort; the bot joins even without setting one)
-  let nameSet = false;
-  for (const sel of selectors.nameInputCandidates) {
-    try {
-      await page.fill(sel, botName, { timeout: 4000 });
-      console.log(`[${jobId}] name filled via ${sel}`);
-      nameSet = true;
-      break;
-    } catch {}
-  }
-  if (!nameSet) {
-    console.warn(`[${jobId}] name input not found — continuing`);
-    await debugDump(page, '02-no-name-input', jobId, outputDir);
-  }
-
-  // Toggle camera/mic off (best effort)
-  await tryClickAny(page, selectors.cameraToggleCandidates, `[${jobId}] camera`);
-  await tryClickAny(page, selectors.micToggleCandidates, `[${jobId}] mic`);
-
-  // Click ask-to-join — try each candidate
-  const asked = await tryClickAny(page, selectors.askToJoinCandidates, `[${jobId}] ask`);
-  if (!asked) {
-    await debugDump(page, '03-no-ask-button', jobId, outputDir);
-    throw new Error('Could not find ask-to-join button');
-  }
-
-  await debugDump(page, '04-after-ask', jobId, outputDir);
-
-  console.log(`[${jobId}] waiting for admit (timeout 5min)...`);
-  let admitted = false;
-  for (const sel of selectors.inCallCandidates) {
-    try {
-      await page.waitForSelector(sel, { timeout: 5 * 60_000 });
-      console.log(`[${jobId}] admitted (matched ${sel})`);
-      admitted = true;
-      break;
-    } catch {}
-  }
-  if (!admitted) {
-    await debugDump(page, '05-never-admitted', jobId, outputDir);
-    throw new Error('Never admitted into the call');
-  }
-
-  await debugDump(page, '06-admitted', jobId, outputDir);
-  setStatus({ state: 'admitted', startedAt: Date.now(), elapsedSec: 0 });
-
-  // Switch layout to Spotlight so any screen-share dominates the frame
-  await setSpotlightLayout(page, jobId);
-  await debugDump(page, '07-after-layout', jobId, outputDir);
-
-  if (skipRecording) {
-    console.log(`[${jobId}] SKIP_RECORDING=1 — leaving in 3s without capture`);
-    await page.waitForTimeout(3000);
-    clearInterval(elapsedTimer);
-    await browser.close();
-    return;
-  }
-
-  console.log(`[${jobId}] starting ffmpeg → ${outFile}`);
-  setStatus({ state: 'recording' });
-  const ffmpeg = spawn('ffmpeg', [
-    '-y',
-    '-f', 'x11grab',
-    '-video_size', '1280x720',
-    '-framerate', '10',
-    '-i', ':99',
-    '-f', 'pulse',
-    '-ac', '2',
-    '-ar', '48000',
-    '-i', 'MeetSink.monitor',
-    '-af', 'aresample=async=1:first_pts=0',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-pix_fmt', 'yuv420p',
-    '-g', '20',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-movflags', '+faststart',
-    outFile,
-  ]);
-  ffmpeg.stderr.on('data', (d) => process.stderr.write(`[ffmpeg] ${d}`));
-
-  const maxMs = (opts.maxDurationSec ?? 0) * 1000;
-  let maxTimer: NodeJS.Timeout | undefined;
+  const pollState: PollState = {
+    aborted: false,
+    browserDisconnected: false,
+    pageError: null,
+    lastUrl: '',
+    lastTitle: '',
+    startedAtMs,
+    reason: null,
+    reasonDetail: null,
+  };
 
   try {
-    if (maxMs > 0) {
-      console.log(`[${jobId}] max duration ${opts.maxDurationSec}s — will stop ffmpeg after that`);
-      maxTimer = setTimeout(() => {
-        console.log(`[${jobId}] max duration reached`);
-        // Replace meeting ended signal by terminating — simplest: blow up the
-        // poll loop by throwing a sentinel via global.
-        (global as any).__MAX_DURATION_HIT = true;
-      }, maxMs);
+    const mgr = BrowserManager.getInstance();
+    setState(opts, 'BROWSER_STARTING', { jobId });
+    const context = await mgr.ensureReady();
+    setState(opts, 'AUTH_CHECK', { jobId });
+
+    if (process.env.ALLOW_COOKIE_INJECTION === '1') {
+      const cookiesPath = process.env.COOKIES_PATH || '/app/cookies.json';
+      if (fs.existsSync(cookiesPath)) {
+        warn('cookie_injection_enabled', { jobId, cookiesPath });
+        await injectCookiesFromFile(context, cookiesPath);
+      } else {
+        warn('cookie_injection_no_file', { jobId, cookiesPath });
+      }
     }
-    await waitForMeetingEnd(page, jobId);
-  } finally {
-    if (maxTimer) clearTimeout(maxTimer);
-    clearInterval(elapsedTimer);
-    setStatus({ state: 'ending' });
-    console.log(`[${jobId}] meeting ended — stopping ffmpeg`);
-    ffmpeg.kill('SIGINT');
-    await new Promise<void>((resolve) => {
-      ffmpeg.on('exit', () => resolve());
-      setTimeout(() => { ffmpeg.kill('SIGKILL'); resolve(); }, 10_000);
+
+    page = await mgr.newPage();
+    wirePageDiagnostics(page, pollState, jobId);
+
+    mgr.on('disconnected', (reason) => {
+      pollState.browserDisconnected = true;
+      pollState.reason = 'BROWSER_CRASHED';
+      pollState.reasonDetail = `browser disconnected (${reason})`;
+      info('job_browser_disconnected', { jobId });
     });
-    await browser.close();
+
+    setState(opts, 'JOINING', { jobId });
+
+    info('page_goto', { jobId, meetUrl });
+    await page.goto(meetUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await page.waitForTimeout(3000);
+
+    await tryClickAny(page, acceptCookiesCandidates, 'cookies', jobId);
+
+    let nameSet = false;
+    for (const sel of nameInputCandidates) {
+      try {
+        await page.fill(sel, botName, { timeout: 4000 });
+        info('name_filled', { jobId, sel });
+        nameSet = true;
+        break;
+      } catch {}
+    }
+    if (!nameSet) warn('name_input_not_found', { jobId });
+
+    await tryClickAny(page, cameraToggleCandidates, 'camera', jobId);
+    await tryClickAny(page, micToggleCandidates, 'mic', jobId);
+
+    const asked = await tryClickAny(page, askToJoinCandidates, 'ask', jobId);
+    if (!asked) {
+      throw new Error('Could not find ask-to-join button');
+    }
+
+    setState(opts, 'WAITING_FOR_ADMISSION', { jobId });
+    info('waiting_for_admit', { jobId, timeoutMs: 5 * 60_000 });
+
+    let admitted = false;
+    for (const sel of inCallCandidates) {
+      try {
+        await page.waitForSelector(sel, { timeout: 5 * 60_000 });
+        info('admitted', { jobId, sel });
+        admitted = true;
+        break;
+      } catch {}
+    }
+    if (!admitted) {
+      throw new Error('Never admitted into the call');
+    }
+
+    await setSpotlightLayout(page, jobId);
+    setState(opts, 'RECORDING', { jobId, admittedAt: Date.now() });
+
+    if (skipRecording) {
+      info('skip_recording', { jobId });
+      await page.waitForTimeout(3000);
+      result = {
+        state: 'COMPLETED',
+        bytes: 0,
+        durationSec: Math.floor((Date.now() - startedAtMs) / 1000),
+      };
+      return finalize();
+    }
+
+    recorder = new Recorder({ jobId, outDir });
+    await recorder.start();
+    await jobStore.update(jobId, { state: 'RECORDING', outDir });
+
+    recorder.on('exit', (code, signal) => {
+      if (code !== 0 || signal) {
+        pollState.reason = 'FFMPEG_FAILED';
+        pollState.reasonDetail = `ffmpeg exited code=${code} signal=${signal ?? 'none'}`;
+        warn('ffmpeg_failed_during_recording', { jobId, code, signal });
+      }
+    });
+
+    if (maxDurationSec && maxDurationSec > 0) {
+      pollState.maxDurationTimer = setTimeout(() => {
+        pollState.reason = 'MEETING_ENDED';
+        pollState.reasonDetail = `max duration ${maxDurationSec}s reached`;
+        info('max_duration_reached', { jobId, maxDurationSec });
+      }, maxDurationSec * 1000);
+    }
+
+    await waitForMeetingEnd(page, jobId, pollState, recorder);
+
+    setState(opts, 'STOPPING', { jobId });
+    const recResult = await recorder.stop();
+    setState(opts, 'FINALIZING', { jobId });
+
+    let reason: FailureReason | null = pollState.reason;
+    let detail = pollState.reasonDetail ?? '';
+
+    if (!recResult.ok) {
+      reason = 'FFMPEG_FAILED';
+      detail = recResult.detail;
+    }
+    if (pollState.aborted) {
+      reason = 'ABORTED';
+      detail = 'user aborted';
+    }
+    if (!reason) reason = 'MEETING_ENDED';
+
+    const _classification: ClassifyOutput = { reason, detail };
+
+    result = {
+      state: reason === 'ABORTED' ? 'ABORTED' : (reason === 'MEETING_ENDED' ? 'COMPLETED' : 'FAILED'),
+      failureReason: reason === 'MEETING_ENDED' ? undefined : reason,
+      failureDetail: detail,
+      bytes: recResult.totalBytes,
+      durationSec: Math.floor((Date.now() - startedAtMs) / 1000),
+    };
+
+    info('job_end', {
+      jobId,
+      state: result.state,
+      reason: result.failureReason ?? 'OK',
+      detail,
+      bytes: result.bytes,
+      durationSec: result.durationSec,
+    });
+    void _classification;
+    return finalize();
+  } catch (e: any) {
+    error('job_threw', { jobId, error: e.message });
+    setState(opts, 'FAILED', { jobId, error: e.message });
+    let bytes = 0;
+    if (recorder) {
+      try {
+        const s = await recorder.status();
+        bytes = s.bytes;
+        await recorder.stop(2000);
+      } catch {}
+    }
+    if (!result) {
+      result = {
+        state: 'FAILED',
+        failureReason: classifyException(e),
+        failureDetail: e.message?.slice(0, 200),
+        bytes,
+        durationSec: Math.floor((Date.now() - startedAtMs) / 1000),
+      };
+    }
+    return finalize();
+  } finally {
+    if (pollState.maxDurationTimer) clearTimeout(pollState.maxDurationTimer);
+    if (page) await BrowserManager.getInstance().closePage(page);
   }
 
-  console.log(`[${jobId}] saved ${outFile} (${fs.statSync(outFile).size} bytes)`);
+  function finalize(): JoinResult {
+    const r = result!;
+    void jobStore.update(jobId, {
+      state: r.state,
+      failureReason: r.failureReason,
+      failureDetail: r.failureDetail,
+      endedAt: Date.now(),
+      durationSec: r.durationSec,
+      totalBytes: r.bytes,
+    }).catch(() => undefined);
+    return r;
+  }
 }
 
-async function waitForMeetingEnd(page: Page, jobId: string) {
+function classifyException(e: any): FailureReason {
+  const m = String(e?.message ?? '').toLowerCase();
+  if (m.includes('never admitted')) return 'CANNOT_JOIN';
+  if (m.includes('ask-to-join')) return 'CANNOT_JOIN';
+  if (m.includes('target page') || m.includes('page closed')) return 'BROWSER_CRASHED';
+  if (m.includes('navigation')) return 'BROWSER_CRASHED';
+  return 'UNKNOWN_FAILURE';
+}
+
+function wirePageDiagnostics(page: Page, state: PollState, jobId: string): void {
+  page.on('framenavigated', (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const url = frame.url();
+    const prev = state.lastUrl;
+    state.lastUrl = url;
+    info('framenavigated', { jobId, from: prev ?? '', to: url });
+  });
+
+  page.on('console', (msg) => {
+    if (msg.type() !== 'error' && msg.type() !== 'warning') return;
+    debug('console', { jobId, type: msg.type(), text: msg.text().slice(0, 300) });
+  });
+
+  page.on('pageerror', (err) => {
+    state.pageError = { message: err.message };
+    warn('pageerror', { jobId, error: err.message.slice(0, 300) });
+  });
+
+  page.on('response', (resp: Response) => {
+    const url = resp.url();
+    const status = resp.status();
+    if (status < 400) return;
+    if (!/(accounts\.google\.com|meet\.google\.com)/i.test(url)) return;
+    warn('http_error', { jobId, status, url });
+  });
+}
+
+async function waitForMeetingEnd(
+  page: Page,
+  jobId: string,
+  state: PollState,
+  recorder: Recorder | null,
+): Promise<void> {
+  let lastHeartbeat = 0;
   while (true) {
-    if ((global as any).__MAX_DURATION_HIT) {
-      console.log(`[${jobId}] max duration flag set — exiting poll`);
+    if (state.aborted) return;
+    if (state.browserDisconnected) return;
+    if (state.reason) return;
+    if (state.pageError) {
+      await page.waitForTimeout(2000).catch(() => undefined);
+      if (!page.isClosed()) {
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 10_000 });
+          await page.waitForTimeout(1000);
+          state.pageError = null;
+          continue;
+        } catch {}
+      }
       return;
     }
-    let ended = false;
-    for (const sel of selectors.meetingEndedCandidates) {
+
+    // Capture URL + title for failure classification.
+    try {
+      state.lastUrl = page.url();
+      state.lastTitle = await page.title();
+    } catch {}
+
+    const pollResult = await probeFailureSelectors(page);
+    if (pollResult) {
+      state.matchedGroup = pollResult.group;
+      state.matchedSelector = pollResult.selector;
+      const cls = classifyEndSignal({
+        url: state.lastUrl,
+        title: state.lastTitle,
+        matchedGroup: pollResult.group,
+        matchedSelector: pollResult.selector,
+        browserDisconnected: state.browserDisconnected,
+        pageError: state.pageError ?? undefined,
+      });
+      state.reason = cls.reason;
+      state.reasonDetail = cls.detail;
+      info('meeting_signal', { jobId, group: pollResult.group, selector: pollResult.selector, reason: cls.reason });
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastHeartbeat > 30_000) {
+      lastHeartbeat = now;
+      const status = recorder ? await recorder.status() : null;
+      const mem = process.memoryUsage();
+      info('heartbeat', {
+        jobId,
+        elapsedSec: Math.floor((now - state.startedAtMs) / 1000),
+        url: state.lastUrl,
+        title: state.lastTitle,
+        bytes: status?.bytes ?? 0,
+        segments: status?.segments.length ?? 0,
+        rssMB: Math.round(mem.rss / 1024 / 1024),
+      });
+    }
+
+    await page.waitForTimeout(5000).catch(() => undefined);
+  }
+}
+
+async function probeFailureSelectors(page: Page): Promise<{ group: 'auth' | 'removed' | 'reconnecting' | 'cannotJoin' | 'ended'; selector: string } | null> {
+  for (const group of failureSelectorGroups) {
+    for (const sel of group.candidates) {
       try {
         const el = await page.$(sel);
         if (el) {
-          console.log(`[${jobId}] end indicator matched ${sel}`);
-          ended = true;
-          break;
+          const text = await el.textContent().catch(() => sel);
+          const resolvedGroup = groupForSelector(text ?? '') ?? group.group;
+          if (resolvedGroup === group.group) {
+            return { group: group.group, selector: sel };
+          }
         }
       } catch {}
     }
-    if (ended) return;
-    await page.waitForTimeout(5000);
   }
+  return null;
 }
 
-async function setSpotlightLayout(page: Page, jobId: string) {
-  console.log(`[${jobId}] setting Spotlight layout`);
-  // Current Meet UI: layout lives in "More options" (3-dot) → "Change layout" → Spotlight.
+async function setSpotlightLayout(page: Page, jobId: string): Promise<void> {
+  info('ui_setting_spotlight', { jobId });
   let opened = false;
-  for (const sel of selectors.moreOptionsButtonCandidates) {
+  for (const sel of moreOptionsButtonCandidates) {
     try {
       await page.click(sel, { timeout: 3000 });
-      console.log(`[${jobId}] opened More options via ${sel}`);
+      info('clicked', { jobId, label: 'moreOptions', sel });
       opened = true;
       break;
     } catch {}
   }
-  if (!opened) {
-    console.warn(`[${jobId}] More options button not found — skipping layout change`);
-    return;
-  }
+  if (!opened) { warn('more_options_not_found', { jobId }); return; }
   await page.waitForTimeout(500);
   let layoutClicked = false;
-  for (const sel of selectors.adjustViewMenuItemCandidates) {
+  for (const sel of adjustViewMenuItemCandidates) {
     try {
       await page.click(sel, { timeout: 3000 });
-      console.log(`[${jobId}] clicked Adjust view via ${sel}`);
+      info('clicked', { jobId, label: 'adjustView', sel });
       layoutClicked = true;
       break;
     } catch {}
   }
   if (!layoutClicked) {
-    console.warn(`[${jobId}] Adjust view menu item not found — skipping Spotlight`);
-    // Close the open menu so we don't leave it hanging
+    warn('adjust_view_not_found', { jobId });
     await page.keyboard.press('Escape');
     return;
   }
   await page.waitForTimeout(500);
-  let picked = false;
-  for (const sel of selectors.spotlightOptionCandidates) {
+  for (const sel of spotlightOptionCandidates) {
     try {
       await page.click(sel, { timeout: 3000 });
-      console.log(`[${jobId}] picked Spotlight via ${sel}`);
-      picked = true;
+      info('clicked', { jobId, label: 'spotlight', sel });
       break;
     } catch {}
   }
-  if (!picked) {
-    console.warn(`[${jobId}] Spotlight option not found in submenu`);
-  }
   await page.waitForTimeout(500);
-  // Close the dialog (the X button) so it doesn't cover the screen-share
-  // for the entire recording.
-  for (const sel of selectors.dialogCloseButtonCandidates) {
+  for (const sel of dialogCloseButtonCandidates) {
     try {
       await page.click(sel, { timeout: 2000 });
-      console.log(`[${jobId}] closed Adjust view dialog via ${sel}`);
+      info('clicked', { jobId, label: 'dialogClose', sel });
       break;
     } catch {}
   }
   await page.waitForTimeout(300);
+}
+
+function setState(opts: JoinOpts, state: JobState, extra: Record<string, unknown> = {}): void {
+  opts.onState?.(state, extra);
+}
+
+async function injectCookiesFromFile(ctx: BrowserContext, cookiesPath: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(cookiesPath, 'utf-8').trim();
+  } catch { return; }
+  if (!raw) return;
+
+  let parsed: any[] = [];
+  try {
+    if (raw.startsWith('[') || raw.startsWith('{')) {
+      const j = JSON.parse(raw);
+      if (Array.isArray(j)) parsed = j;
+    } else if (raw.startsWith('#') || raw.includes('\t')) {
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t || t.startsWith('#')) continue;
+        const parts = t.split('\t');
+        if (parts.length < 7) continue;
+        const [domain, , pathV, secureStr, expirationStr, name, ...vp] = parts;
+        parsed.push({
+          name,
+          value: vp.join('\t'),
+          domain,
+          path: pathV,
+          expires: parseInt(expirationStr, 10) || -1,
+          secure: secureStr === 'TRUE',
+        });
+      }
+    }
+  } catch {
+    return;
+  }
+
+  const filtered = parsed
+    .filter((c: any) => c?.domain?.includes('google.com'))
+    .map((c: any) => {
+      let domain: string = c.domain || c.host || '';
+      if (!domain.startsWith('.')) domain = '.' + domain;
+      return {
+        name: String(c.name),
+        value: String(c.value),
+        domain,
+        path: c.path || '/',
+        expires:
+          typeof c.expirationDate === 'number' ? c.expirationDate :
+          typeof c.expires === 'number' ? c.expires : -1,
+        httpOnly: !!c.httpOnly,
+        secure: !!c.secure,
+        sameSite: 'Lax' as const,
+      };
+    });
+
+  if (filtered.length === 0) return;
+  await ctx.addCookies(filtered);
+  warn('cookies_injected', { count: filtered.length });
 }
