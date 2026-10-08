@@ -26,6 +26,18 @@ WEBSOCKIFY_PID=$!
 # (the worker process also runs as root in this image).
 mkdir -p /var/lib/meet-profile /var/lib/meet-recorder /var/log/meet-recorder
 
+# Clean stale Chrome singleton lock files left behind by a prior crashed or
+# SIGKILLed container. Chrome refuses to launch with exitCode=21 when these
+# exist and reference a dead PID. Only safe when no Chrome is currently
+# running here — pgrep guards against the case where the lock is genuinely
+# held by a sibling process.
+if ! pgrep -f "google-chrome-stable" >/dev/null 2>&1; then
+  rm -f /var/lib/meet-profile/SingletonLock \
+        /var/lib/meet-profile/SingletonCookie \
+        /var/lib/meet-profile/SingletonSocket
+  echo "[entrypoint] cleared stale Chrome singleton lock files"
+fi
+
 # Run the controller. SIGTERM → graceful (5s grace for browser/ffmpeg to die).
 trap 'kill -TERM "$NODE_PID" 2>/dev/null || true; kill "$WEBSOCKIFY_PID" 2>/dev/null || true; kill "$XVFB_PID" 2>/dev/null || true; sleep 0.5; exit 0' TERM INT
 
