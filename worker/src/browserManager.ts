@@ -153,6 +153,81 @@ export class BrowserManager {
       });
     }
 
+    // Popup killer. Meet/Chrome auto-open tabs (chat popout, PiP
+    // screenshare, restore-from-profile) all briefly land on about:blank or
+    // chrome://. x11grab captures the whole X display, so those tabs would
+    // pollute recordings. Close any page whose URL settles to a blank-ish
+    // origin. The recording page navigates to meet.google.com within
+    // ~1s of creation, so its URL won't match by the time we check.
+    const isBlankish = (u: string): boolean =>
+      u === '' || u === 'about:blank' || u.startsWith('chrome://');
+
+    const closeIfBlank = async (p: Page): Promise<void> => {
+      try {
+        if (p.isClosed()) return;
+        const url = p.url();
+        if (isBlankish(url)) {
+          warn('popup_closed', { url });
+          await p.close().catch(() => undefined);
+        }
+      } catch {}
+    };
+
+    ctx.on('page', (p) => {
+      const createdAt = Date.now();
+      // Best-effort opener trace — page.opener() returns the Page that
+      // created this one via window.open / target=_blank, or null if it
+      // came from session-restore / SW clients.openWindow / browser-chrome.
+      let openerUrl: string | null = null;
+      try {
+        const op = p.opener();
+        openerUrl = op ? (op.url() || null) : null;
+      } catch {}
+      info('page_created', {
+        count: ctx.pages().length,
+        opener: openerUrl,
+      });
+      // Stream every navigation this new page goes through so a kill after
+      // the first blank check still leaves breadcrumbs to correlate.
+      p.on('framenavigated', (f) => {
+        if (f !== p.mainFrame()) return;
+        if (p.isClosed()) return;
+        info('popup_navigated', {
+          elapsedMs: Date.now() - createdAt,
+          url: f.url(),
+        });
+      });
+      // URL is about:blank at creation; wait one tick so goto() can land
+      // a real URL for the recording page before we decide to kill.
+      setTimeout(() => { void closeIfBlank(p); }, 800);
+    });
+
+    // Session-restore cleanup. The persistent profile reopens any tabs that
+    // were open when Chrome last shut down. Restore happens over ~1–2s
+    // AFTER launch returns, so a synchronous sweep closes nothing useful.
+    // Delay, then close every page that didn't navigate somewhere real.
+    setTimeout(async () => {
+      try {
+        const pages = ctx.pages();
+        let keptOne = false;
+        for (const p of pages) {
+          if (p.isClosed()) continue;
+          const u = p.url();
+          // Keep a single real-URL page so Chrome has a foreground tab.
+          // Close the rest, whatever their URL. Anchor: the first real URL
+          // we see (or fall back to the first page if all are blank).
+          if (!keptOne) {
+            keptOne = true;
+            continue;
+          }
+          warn('popup_closed', { url: u, source: 'startup_cleanup' });
+          await p.close().catch(() => undefined);
+        }
+      } catch (e: any) {
+        warn('startup_cleanup_failed', { error: e.message });
+      }
+    }, 2000);
+
     info('browser_launched', { profileDir: this.profileDir });
     return ctx;
   }
