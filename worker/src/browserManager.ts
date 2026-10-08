@@ -178,15 +178,17 @@ export class BrowserManager {
       // Best-effort opener trace — page.opener() returns the Page that
       // created this one via window.open / target=_blank, or null if it
       // came from session-restore / SW clients.openWindow / browser-chrome.
-      let openerUrl: string | null = null;
-      try {
-        const op = p.opener();
-        openerUrl = op ? (op.url() || null) : null;
-      } catch {}
-      info('page_created', {
-        count: ctx.pages().length,
-        opener: openerUrl,
-      });
+      void (async () => {
+        let openerUrl: string | null = null;
+        try {
+          const op = await p.opener();
+          openerUrl = op ? (op.url() || null) : null;
+        } catch {}
+        info('page_created', {
+          count: ctx.pages().length,
+          opener: openerUrl,
+        });
+      })();
       // Stream every navigation this new page goes through so a kill after
       // the first blank check still leaves breadcrumbs to correlate.
       p.on('framenavigated', (f) => {
