@@ -107,7 +107,6 @@ export class BrowserManager {
     await fs.promises.mkdir(this.profileDir, { recursive: true });
 
     const args = [
-      '--no-sandbox',
       '--disable-blink-features=AutomationControlled',
       '--use-fake-ui-for-media-stream',
       // NOTE: no --disable-dev-shm-usage. compose.yml sets shm_size: 2gb.
@@ -268,7 +267,7 @@ export class BrowserManager {
     const ctx = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       executablePath: this.executablePath,
-      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+      args: ['--disable-blink-features=AutomationControlled'],
       viewport: this.viewport,
       locale: this.locale,
     });

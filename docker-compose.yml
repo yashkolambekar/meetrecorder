@@ -22,8 +22,7 @@ services:
       # (left empty here).
     ports:
       # Bind to loopback. SSH tunnel from your laptop.
-      - "127.0.0.1:3333:3333"   # dashboard + REST
-      - "127.0.0.1:6080:6080"   # noVNC
+      - "3333:3333"   # dashboard + REST
     volumes:
       - ./recordings:/recordings
       - meet-profile:/var/lib/meet-profile
