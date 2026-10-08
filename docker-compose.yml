@@ -23,6 +23,7 @@ services:
     ports:
       # Bind to loopback. SSH tunnel from your laptop.
       - "3333:3333"   # dashboard + REST
+      - "6080:6080"
     volumes:
       - ./recordings:/recordings
       - meet-profile:/var/lib/meet-profile
